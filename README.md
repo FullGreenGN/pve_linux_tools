@@ -12,7 +12,9 @@ A collection of utility scripts and Docker configurations designed to streamline
 ├── README.md                                        # ← You are here
 ├── scripts/
 │   ├── README.md                                    # Script-specific documentation
-│   └── update_containers.sh                         # Automated LXC update script
+│   ├── update_containers.sh                         # Multi-OS LXC updater + snapshots
+│   ├── pve_backup_check.sh                          # Vzdump backup job auditor
+│   └── lxc_baseline_setup.sh                        # New container standardization
 └── docker_compose/
     └── monitoring/
         ├── .env                                     # Environment variable template
@@ -30,31 +32,49 @@ A collection of utility scripts and Docker configurations designed to streamline
 
 ## 🚀 Getting Started
 
-### 1. Smart LXC Updater (`scripts/`)
+### 1. Scripts (`scripts/`)
 
-The `update_containers.sh` script automates the update process for **all running LXC containers** on your Proxmox host. It performs OS detection to apply the correct package manager commands automatically.
-
-**Supported Distributions:**
-
-| Distribution     | Package Manager | Detection File         |
-| ---------------- | --------------- | ---------------------- |
-| Debian / Ubuntu  | `apt`           | `/etc/debian_version`  |
-| Alpine Linux     | `apk`           | `/etc/alpine-release`  |
-| Arch Linux       | `pacman`        | `/etc/arch-release`    |
-| Fedora           | `dnf`           | `/etc/fedora-release`  |
-
-**Quick Start:**
+All scripts require **root privileges** and are designed to run **directly on the Proxmox VE host**.
 
 ```bash
-# Copy to your Proxmox host
-scp scripts/update_containers.sh root@<your-pve-ip>:/root/
+# Copy all scripts to your PVE host
+scp scripts/*.sh root@<your-pve-ip>:/root/
 
-# Make executable and run
-chmod +x /root/update_containers.sh
+# Make them executable
+chmod +x /root/*.sh
+```
+
+#### `update_containers.sh` — Smart LXC Updater
+
+Automatically updates **all running LXC containers**. Creates a **pre-update snapshot** for each container so you can roll back instantly if something breaks.
+
+**Supported OS:** Debian/Ubuntu (`apt`), Alpine (`apk`), Arch (`pacman`), Fedora (`dnf`)
+
+```bash
 ./update_containers.sh
 ```
 
-> 📖 See [`scripts/README.md`](./scripts/README.md) for cron scheduling, example output, and detailed usage.
+#### `pve_backup_check.sh` — Backup Auditor
+
+Scans recent `vzdump` backup tasks and reports successes and failures. Uses the `pvesh` API when available, falls back to filesystem logs otherwise.
+
+```bash
+# Check last 24 hours
+./pve_backup_check.sh
+
+# Check last 7 days
+./pve_backup_check.sh --days 7
+```
+
+#### `lxc_baseline_setup.sh` — Container Baseline
+
+Applies a standard configuration to a freshly created container: timezone, common packages, SSH hardening, and firewall rules.
+
+```bash
+./lxc_baseline_setup.sh 105 --timezone Europe/Berlin
+```
+
+> 📖 See [`scripts/README.md`](./scripts/README.md) for full documentation, cron scheduling, rollback instructions, and examples.
 
 ---
 
@@ -89,7 +109,7 @@ docker compose ps
 **Key Features:**
 
 - 🔒 **Automatic HTTPS** — Traefik handles TLS certificates via Let's Encrypt (TLS-ALPN-01 challenge).
-- 📊 **Auto-provisioned datasource** — Grafana connects to InfluxDB automatically on first boot via provisioning files.
+- 📊 **Auto-provisioned datasource** — Grafana connects to InfluxDB automatically on first boot.
 - 🔧 **Environment-driven config** — All secrets and settings live in `.env`, never hardcoded.
 
 **Proxmox Integration:**
@@ -98,19 +118,20 @@ docker compose ps
 2. Point it to your Docker host on port `8086` using the org, bucket, and token from your `.env` file.
 3. Metrics will begin flowing within seconds.
 
-> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for the full architecture diagram, all configuration options, and detailed deployment steps.
+> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for full architecture diagram, all config options, and detailed deployment steps.
 
 ---
 
 ## 🛠️ Requirements
 
-| Component              | Version                    |
-| ---------------------- | -------------------------- |
-| Proxmox VE             | 7.x / 8.x / 9.x          |
-| Docker Engine          | ≥ 20.10                   |
-| Docker Compose         | v2 (`docker compose` CLI) |
-| Root privileges        | Required for LXC script   |
+| Component                | Version                    |
+| ------------------------ | -------------------------- |
+| Proxmox VE               | 7.x / 8.x / 9.x          |
+| Docker Engine            | ≥ 20.10                   |
+| Docker Compose           | v2 (`docker compose` CLI) |
+| Root privileges          | Required for all scripts   |
 | Public domain (optional) | Required for Let's Encrypt |
+| `jq` (optional)          | For `pve_backup_check.sh` API mode |
 
 ---
 
