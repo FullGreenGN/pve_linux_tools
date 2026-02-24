@@ -95,9 +95,14 @@ check_via_tasklog() {
     local INDEX_FILES=()
     [ -f "${INDEX_ACTIVE}" ] && INDEX_FILES+=("${INDEX_ACTIVE}")
 
-    for f in "${TASK_DIR}"/index* 2>/dev/null; do
+    # Use nullglob so the loop is skipped if no index files exist
+    local _old_nullglob
+    _old_nullglob=$(shopt -p nullglob || true)
+    shopt -s nullglob
+    for f in "${TASK_DIR}"/index*; do
         [ -f "${f}" ] && INDEX_FILES+=("${f}")
     done
+    eval "${_old_nullglob}"
 
     if [ ${#INDEX_FILES[@]} -eq 0 ]; then
         log_warn "No task index files found in ${TASK_DIR}."
