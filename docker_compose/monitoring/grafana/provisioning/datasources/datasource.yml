@@ -1,0 +1,26 @@
+# ============================================================
+#  Grafana — Datasource Provisioning
+# ============================================================
+#  This file is mounted into the Grafana container and
+#  automatically registers InfluxDB as a datasource on first
+#  boot. No manual setup required.
+#
+#  Environment variables are injected by docker-compose.yml.
+# ============================================================
+
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: ${INFLUXDB_URL}
+    isDefault: true
+    editable: true
+    jsonData:
+      version: Flux
+      organization: ${INFLUXDB_ORG}
+      defaultBucket: ${INFLUXDB_BUCKET}
+      tlsSkipVerify: true
+    secureJsonData:
+      token: ${INFLUXDB_TOKEN}

@@ -1,0 +1,42 @@
+# ============================================================
+#  Traefik v2 — Static Configuration
+# ============================================================
+#  This file is mounted read-only into the Traefik container.
+#  Dynamic configuration (routers, services) comes from Docker
+#  labels defined in docker-compose.yml.
+# ============================================================
+
+# ---- API / Dashboard (optional, disable in production) ----
+api:
+  dashboard: true
+  insecure: true          # access at http://<host>:8080/dashboard/
+
+# ---- Entrypoints ----
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+# ---- Let's Encrypt Certificate Resolver ----
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "${ACME_EMAIL}"      # pulled from .env at deploy time
+      storage: /letsencrypt/acme.json
+      tlsChallenge: {}            # TLS-ALPN-01 challenge (port 443)
+
+# ---- Docker Provider ----
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false       # only route containers with traefik.enable=true
+
+# ---- Logging ----
+log:
+  level: INFO
