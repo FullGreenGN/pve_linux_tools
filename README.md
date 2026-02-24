@@ -1,6 +1,6 @@
 # pve_linux_tools 🛠️
 
-A collection of utility scripts and Docker configurations designed to streamline management, monitoring, and maintenance for **Proxmox VE (PVE)** environments and Linux containers.
+A modular, professional automation toolkit for **Proxmox VE** environments — container updates with ZFS/LVM snapshots, host health monitoring, LXC bootstrapping, and a full observability stack.
 
 ---
 
@@ -12,112 +12,115 @@ A collection of utility scripts and Docker configurations designed to streamline
 ├── README.md                                        # ← You are here
 ├── setup.sh                                         # Master interactive installer
 ├── scripts/
-│   ├── README.md                                    # Script-specific documentation
-│   ├── update_containers.sh                         # Multi-OS LXC updater + ZFS/LVM snapshots
-│   ├── pve_backup_check.sh                          # Vzdump backup job auditor
-│   └── lxc_baseline_setup.sh                        # New container standardization
+│   ├── README.md                                    # Script documentation
+│   ├── update_containers.sh                         # Multi-OS LXC updater + snapshots
+│   ├── bootstrap_lxc.sh                             # Golden Image container setup
+│   └── pve_health.sh                                # SMART disk + backup audit
 └── docker_compose/
     └── monitoring/
         ├── .env                                     # Environment variable template
-        ├── README.md                                # Stack-specific documentation
+        ├── README.md                                # Stack documentation
         ├── docker-compose.yml                       # Traefik + InfluxDB + Grafana
         ├── traefik/
-        │   └── traefik.yml                          # Traefik v2 static configuration
+        │   └── traefik.yml                          # Traefik v2 static config
         └── grafana/
             └── provisioning/
                 └── datasources/
-                    └── datasource.yml               # Auto-provisions InfluxDB datasource
+                    └── datasource.yml               # Auto-provisions InfluxDB
 ```
 
 ---
 
-## 🚀 Quick Start — Interactive Installer
-
-The fastest way to use this toolkit is through the **master installer**:
+## 🚀 Quick Start
 
 ```bash
+# Clone and run the interactive installer
+git clone https://github.com/<you>/pve_linux_tools.git
+cd pve_linux_tools
 chmod +x setup.sh
 ./setup.sh
 ```
 
-This presents an interactive menu:
+The `select`-based menu will present:
 
-```text
-┌──────────────────────────────────────────────┐
-│  1)  Update All Containers                   │
-│  2)  Install Monitoring Stack                │
-│  3)  Setup Backup Monitor                    │
-│  4)  LXC Hardening                           │
-│  5)  Exit                                    │
-└──────────────────────────────────────────────┘
+```
+1) Update All Containers   (snapshot + upgrade)
+2) Setup Monitoring Stack  (Traefik / InfluxDB / Grafana)
+3) LXC Bootstrapper        (Golden Image setup)
+4) Host Health Check       (SMART + backup audit)
+5) Exit
 ```
 
-**Built-in safety checks:**
+### Built-in Safety
 
-- ✅ Verifies you're running as `root`
-- ✅ Confirms this is a Proxmox VE host (`/usr/bin/pveversion`)
-- ✅ Checks for Docker/Docker Compose before deploying the monitoring stack
-- ✅ Offers to install Docker automatically if missing
-- ✅ Cleans up temporary files on exit (trap handler)
+| Check                  | Detail                                            |
+| ---------------------- | ------------------------------------------------- |
+| Root verification      | Exits if not `root`                               |
+| PVE host detection     | Verifies `/usr/bin/pveversion` exists              |
+| Docker dependency      | Checks for `docker` + `docker compose` before deploying; offers auto-install |
+| Script presence        | Confirms all sub-scripts exist before presenting menu |
+| Cleanup trap           | Removes temp files on `EXIT`, `INT`, `TERM`, `HUP` |
 
 ---
 
-## 📦 Individual Scripts (`scripts/`)
-
-All scripts can also be run standalone. They require **root privileges** on the PVE host.
-
-```bash
-scp scripts/*.sh root@<your-pve-ip>:/root/
-chmod +x /root/*.sh
-```
+## 📦 Scripts
 
 ### `update_containers.sh` — Smart LXC Updater
 
-Updates **all running LXC containers** with automatic OS detection. Creates a **ZFS or LVM snapshot** before each update for instant rollback.
+Discovers all running containers via `pct list`, creates a **storage-aware snapshot** (`ZFS → LVM → pct` fallback), then runs the correct package manager.
 
-| OS              | Package Manager | Snapshot Method                  |
-| --------------- | --------------- | -------------------------------- |
-| Debian / Ubuntu | `apt`           | ZFS → LVM → `pct snapshot`      |
-| Alpine          | `apk`           | ZFS → LVM → `pct snapshot`      |
-| Arch            | `pacman`        | ZFS → LVM → `pct snapshot`      |
-| Fedora          | `dnf`           | ZFS → LVM → `pct snapshot`      |
-
-```bash
-./update_containers.sh
-```
-
-### `pve_backup_check.sh` — Backup Auditor
-
-Parses `/var/log/pve/tasks` for recent `vzdump` results and displays them in colour (**Green** = OK, **Red** = Error, **Yellow** = Running). Falls back to the `pvesh` API when available.
+| OS              | Manager   | Snapshot Strategy             |
+| --------------- | --------- | ----------------------------- |
+| Debian / Ubuntu | `apt`     | ZFS → LVM → `pct snapshot`   |
+| Alpine          | `apk`     | ZFS → LVM → `pct snapshot`   |
+| Arch            | `pacman`  | ZFS → LVM → `pct snapshot`   |
+| Fedora          | `dnf`     | ZFS → LVM → `pct snapshot`   |
 
 ```bash
-./pve_backup_check.sh              # last 24 hours
-./pve_backup_check.sh --days 7     # last 7 days
+./scripts/update_containers.sh
 ```
 
-### `lxc_baseline_setup.sh` — Container Hardening
+### `bootstrap_lxc.sh` — Golden Image Bootstrapper
 
-Applies first-run standardization to a fresh container: installs `curl`, `vim`, `htop`, sets timezone, hardens SSH, and optionally injects an SSH public key.
+Applies first-run standardization to a fresh container:
+
+- Sets timezone
+- Installs `curl`, `vim`, `htop`, `git`, `ca-certificates`, `openssh`
+- Hardens SSH (key-only auth, max 3 tries)
+- Injects an SSH public key
+- Configures locale (Debian/Ubuntu)
 
 ```bash
-./lxc_baseline_setup.sh 105
-./lxc_baseline_setup.sh 105 --timezone America/New_York --ssh-key ~/.ssh/id_ed25519.pub
-./lxc_baseline_setup.sh            # interactive mode
+./scripts/bootstrap_lxc.sh 105
+./scripts/bootstrap_lxc.sh 105 --timezone America/New_York --ssh-key ~/.ssh/id_ed25519.pub
+./scripts/bootstrap_lxc.sh       # interactive mode
 ```
 
-> 📖 See [`scripts/README.md`](./scripts/README.md) for full documentation, cron scheduling, rollback instructions, and examples.
+### `pve_health.sh` — Host Health Check
+
+Two-part health scan:
+
+1. **SMART Disk Status** — scans all block devices via `smartctl`, reports health/temp/model, flags reallocated or pending sectors.
+2. **Backup Audit** — checks last N days of `vzdump` tasks (pvesh API or `/var/log/pve/tasks` fallback), colour-coded results.
+
+```bash
+./scripts/pve_health.sh            # last 24 hours
+./scripts/pve_health.sh --days 7   # last 7 days
+```
+
+> 📖 See [`scripts/README.md`](./scripts/README.md) for full options, cron scheduling, and examples.
 
 ---
 
-## 📊 Monitoring Stack (`docker_compose/monitoring/`)
+## 📊 Monitoring Stack
 
-A production-ready **Traefik + InfluxDB v2 + Grafana** stack optimized for Proxmox VE monitoring.
+A **Traefik v2 + InfluxDB v2 + Grafana** Docker Compose stack with automatic TLS and datasource provisioning.
 
-| Service         | Role                                              | Port(s)       |
-| --------------- | ------------------------------------------------- | ------------- |
-| **Traefik v2**  | Reverse proxy with automatic Let's Encrypt TLS    | `80` / `443`  |
-| **InfluxDB v2** | Time-series database (auto-initialized)            | `8086`        |
-| **Grafana**     | Dashboard & visualization (auto-provisioned)       | `3000`        |
+| Service         | Role                                          | Port(s)       |
+| --------------- | --------------------------------------------- | ------------- |
+| **Traefik v2**  | Reverse proxy · Let's Encrypt TLS · Dashboard | `80` / `443`  |
+| **InfluxDB v2** | Time-series DB · auto-init org/bucket/token   | `8086`        |
+| **Grafana**     | Dashboards · auto-provisioned datasource      | `3000`        |
 
 ```bash
 cd docker_compose/monitoring
@@ -125,22 +128,23 @@ cp .env .env.local && nano .env.local
 docker compose up -d
 ```
 
-**Proxmox Integration:** Datacenter → Metric Server → Add → InfluxDB → point to port `8086` with org/bucket/token from `.env`.
+**Proxmox integration:** Datacenter → Metric Server → Add → InfluxDB → `http://<docker-host>:8086` with org/bucket/token from `.env`.
 
-> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for full architecture diagram and deployment guide.
+> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for architecture diagram and full setup guide.
 
 ---
 
 ## 🛠️ Requirements
 
-| Component                | Version                    |
-| ------------------------ | -------------------------- |
-| Proxmox VE               | 7.x / 8.x / 9.x          |
-| Docker Engine            | ≥ 20.10                   |
-| Docker Compose           | v2 (`docker compose` CLI) |
-| Root privileges          | Required for all scripts   |
-| Public domain (optional) | Required for Let's Encrypt |
-| `jq` (optional)          | For `pve_backup_check.sh` API mode |
+| Component                 | Version / Note                |
+| ------------------------- | ----------------------------- |
+| Proxmox VE                | 7.x / 8.x / 9.x             |
+| Docker Engine             | ≥ 20.10                      |
+| Docker Compose            | v2 (`docker compose` plugin) |
+| Root privileges           | Required for all scripts      |
+| `smartmontools` (optional)| For disk health checks        |
+| `jq` (optional)           | For pvesh API backup audit    |
+| Public domain (optional)  | For Let's Encrypt TLS         |
 
 ---
 

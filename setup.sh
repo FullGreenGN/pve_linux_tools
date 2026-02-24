@@ -1,346 +1,258 @@
 #!/bin/bash
 # ============================================================
-#  setup.sh — Master Installer for pve_linux_tools
+#  setup.sh — pve_linux_tools Master Installer
 # ============================================================
-#  Interactive menu to manage Proxmox VE containers, deploy
-#  the monitoring stack, configure backup monitoring, and
-#  harden LXC containers.
+#  Central entry point for all Proxmox VE automation tasks.
+#  Presents a select-based menu for:
+#    1. Updating all LXC containers (with ZFS/LVM snapshots)
+#    2. Deploying the monitoring stack (Traefik + InfluxDB + Grafana)
+#    3. Bootstrapping a new LXC ("Golden Image" baseline)
+#    4. Running a host health check (SMART + backup audit)
+#    5. Exiting
 #
-#  Usage:  ./setup.sh
-#  Requires: root on a Proxmox VE host
+#  Requirements: root privileges on a Proxmox VE host.
 # ============================================================
 
 set -euo pipefail
 
-# ---- Paths (relative to this script) ----
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS_DIR="${SCRIPT_DIR}/scripts"
-COMPOSE_DIR="${SCRIPT_DIR}/docker_compose/monitoring"
+# ---- Resolve paths relative to this script ----
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPTS_DIR="${SCRIPT_DIR}/scripts"
+readonly COMPOSE_DIR="${SCRIPT_DIR}/docker_compose/monitoring"
 TMPDIR_SETUP=""
 
-# ---- Colours ----
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# ---- Colours & formatting ----
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly DIM='\033[2m'
+readonly NC='\033[0m'
 
-# ---- Helpers ----
-log_info()    { printf "${CYAN}[INFO]${NC}  %s\n" "$*"; }
-log_ok()      { printf "${GREEN}[ OK ]${NC}  %s\n" "$*"; }
-log_warn()    { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
-log_err()     { printf "${RED}[FAIL]${NC}  %s\n" "$*"; }
-separator()   { echo "──────────────────────────────────────────────"; }
+log_info()  { printf "${CYAN}  ℹ${NC}  %s\n" "$*"; }
+log_ok()    { printf "${GREEN}  ✔${NC}  %s\n" "$*"; }
+log_warn()  { printf "${YELLOW}  ⚠${NC}  %s\n" "$*"; }
+log_err()   { printf "${RED}  ✖${NC}  %s\n" "$*"; }
+hr()        { printf "${DIM}  %s${NC}\n" "─────────────────────────────────────────────────"; }
 
 # ============================================================
-#  Cleanup trap — runs on EXIT, INT, TERM
+#  Cleanup — runs on any exit
 # ============================================================
 cleanup() {
-    if [ -n "${TMPDIR_SETUP}" ] && [ -d "${TMPDIR_SETUP}" ]; then
-        rm -rf "${TMPDIR_SETUP}"
-    fi
-    echo ""
-    log_info "Goodbye."
+    [ -n "${TMPDIR_SETUP}" ] && [ -d "${TMPDIR_SETUP}" ] && rm -rf "${TMPDIR_SETUP}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 # ============================================================
 #  Pre-flight checks
 # ============================================================
 preflight() {
-    # 1. Root check
     if [ "$(id -u)" -ne 0 ]; then
         log_err "This installer must be run as root."
         exit 1
     fi
 
-    # 2. Proxmox VE host check
     if [ ! -x /usr/bin/pveversion ]; then
-        log_err "This does not appear to be a Proxmox VE host."
-        log_err "/usr/bin/pveversion not found. Aborting."
+        log_err "Not a Proxmox VE host (/usr/bin/pveversion missing). Aborting."
         exit 1
     fi
 
-    # 3. Create a temporary working directory
-    TMPDIR_SETUP=$(mktemp -d /tmp/pve_linux_tools.XXXXXX)
-
-    # 4. Verify sub-scripts exist
-    for script in update_containers.sh pve_backup_check.sh lxc_baseline_setup.sh; do
-        if [ ! -f "${SCRIPTS_DIR}/${script}" ]; then
-            log_err "Missing required script: scripts/${script}"
+    for f in update_containers.sh bootstrap_lxc.sh pve_health.sh; do
+        if [ ! -f "${SCRIPTS_DIR}/${f}" ]; then
+            log_err "Missing required script: scripts/${f}"
             exit 1
         fi
     done
 
-    log_ok "Proxmox VE $(pveversion --verbose 2>/dev/null | head -1 | awk '{print $NF}') detected."
+    TMPDIR_SETUP=$(mktemp -d /tmp/pve_tools.XXXXXX)
+    chmod +x "${SCRIPTS_DIR}"/*.sh
 }
 
 # ============================================================
-#  Option 1 — Update All Containers
+#  Banner
+# ============================================================
+show_banner() {
+    clear
+    printf "${GREEN}"
+    cat << 'EOF'
+
+    ╔═══════════════════════════════════════════════╗
+    ║       ___  _   _____   _____           _      ║
+    ║      | _ \| | / / __| |_   _|___  ___ | |___  ║
+    ║      |  _/| |/ /| _|    | | / _ \/ _ \| (_-<  ║
+    ║      |_|   \__/ |___|   |_| \___/\___/|_/__/  ║
+    ║                                               ║
+    ╚═══════════════════════════════════════════════╝
+EOF
+    printf "${NC}\n"
+    printf "  ${DIM}%s${NC}\n" "$(pveversion 2>/dev/null || echo 'Proxmox VE')"
+    hr
+    echo ""
+}
+
+# ============================================================
+#  Menu Option 1 — Update All Containers
 # ============================================================
 do_update_containers() {
-    separator
+    hr
     log_info "Launching Smart LXC Updater..."
-    separator
+    hr
     echo ""
     bash "${SCRIPTS_DIR}/update_containers.sh"
 }
 
 # ============================================================
-#  Option 2 — Install / Launch Monitoring Stack
+#  Menu Option 2 — Deploy Monitoring Stack
 # ============================================================
-check_docker() {
-    local missing=()
-
-    if ! command -v docker >/dev/null 2>&1; then
-        missing+=("docker")
-    fi
-
-    # docker compose v2 (plugin) or docker-compose v1
-    if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-        missing+=("docker-compose")
-    fi
-
-    if [ ${#missing[@]} -gt 0 ]; then
-        return 1
-    fi
+ensure_docker() {
+    # Returns 0 if docker + compose are available
+    command -v docker >/dev/null 2>&1 || return 1
+    docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1 || return 1
     return 0
 }
 
-install_docker() {
-    log_info "Installing Docker Engine via the official convenience script..."
-    curl -fsSL https://get.docker.com | bash
-    systemctl enable --now docker
-    log_ok "Docker installed and started."
+offer_docker_install() {
+    echo ""
+    log_warn "Docker and/or Docker Compose not found."
+    echo ""
+    read -rp "$(printf "  ${YELLOW}Install Docker now via get.docker.com? [y/N]:${NC} ")" ans
+    case "${ans}" in
+        [yY]|[yY][eE][sS])
+            log_info "Downloading and running the official Docker install script..."
+            curl -fsSL https://get.docker.com | bash
+            systemctl enable --now docker
+            log_ok "Docker installed successfully."
+            ;;
+        *)
+            log_err "Cannot deploy the monitoring stack without Docker."
+            return 1
+            ;;
+    esac
 }
 
 do_monitoring_stack() {
-    separator
+    hr
     log_info "Monitoring Stack Deployment"
-    separator
+    hr
     echo ""
 
-    # ---- Dependency check ----
-    if ! check_docker; then
-        log_warn "Docker and/or Docker Compose are not installed."
-        echo ""
-        read -rp "$(printf "${YELLOW}Would you like to install Docker now? [y/N]:${NC} ")" INSTALL_DOCKER
-        case "${INSTALL_DOCKER}" in
-            [yY]|[yY][eE][sS])
-                install_docker
-                ;;
-            *)
-                log_err "Cannot deploy the monitoring stack without Docker. Returning to menu."
-                return
-                ;;
-        esac
+    if ! ensure_docker; then
+        offer_docker_install || return
     fi
+    log_ok "Docker $(docker --version | awk '{print $3}' | tr -d ',')"
 
-    log_ok "Docker is available: $(docker --version)"
-
-    # ---- Check for .env ----
     if [ ! -f "${COMPOSE_DIR}/.env" ]; then
-        log_err "Environment file not found: ${COMPOSE_DIR}/.env"
-        log_err "Copy the template and fill in your values first."
+        log_err "Missing .env template at: ${COMPOSE_DIR}/.env"
+        log_info "Copy the template and fill in your values first."
         return
     fi
 
-    # ---- Offer to review .env ----
     echo ""
-    read -rp "$(printf "${CYAN}Review .env before deploying? [y/N]:${NC} ")" REVIEW_ENV
-    if [[ "${REVIEW_ENV}" =~ ^[yY] ]]; then
+    read -rp "$(printf "  ${CYAN}Review .env before deploying? [y/N]:${NC} ")" review
+    if [[ "${review}" =~ ^[yY] ]]; then
         echo ""
-        separator
+        hr
         cat "${COMPOSE_DIR}/.env"
-        separator
+        hr
         echo ""
-        read -rp "$(printf "${CYAN}Continue with deployment? [y/N]:${NC} ")" CONTINUE
-        if [[ ! "${CONTINUE}" =~ ^[yY] ]]; then
-            log_info "Deployment cancelled."
-            return
-        fi
+        read -rp "$(printf "  ${CYAN}Proceed with deployment? [y/N]:${NC} ")" proceed
+        [[ "${proceed}" =~ ^[yY] ]] || { log_info "Cancelled."; return; }
     fi
 
-    # ---- Deploy ----
-    log_info "Starting stack in ${COMPOSE_DIR}..."
+    log_info "Starting stack..."
     echo ""
-
     if docker compose version >/dev/null 2>&1; then
-        docker compose -f "${COMPOSE_DIR}/docker-compose.yml" --env-file "${COMPOSE_DIR}/.env" up -d
+        docker compose -f "${COMPOSE_DIR}/docker-compose.yml" \
+                        --env-file "${COMPOSE_DIR}/.env" up -d
     else
-        docker-compose -f "${COMPOSE_DIR}/docker-compose.yml" --env-file "${COMPOSE_DIR}/.env" up -d
+        docker-compose -f "${COMPOSE_DIR}/docker-compose.yml" \
+                        --env-file "${COMPOSE_DIR}/.env" up -d
     fi
 
+    local HOST_IP
+    HOST_IP=$(hostname -I | awk '{print $1}')
     echo ""
     log_ok "Monitoring stack is running."
-    log_info "Grafana  → http://$(hostname -I | awk '{print $1}'):3000"
-    log_info "InfluxDB → http://$(hostname -I | awk '{print $1}'):8086"
+    log_info "Grafana  → http://${HOST_IP}:3000"
+    log_info "InfluxDB → http://${HOST_IP}:8086"
+    log_info "Traefik  → http://${HOST_IP}:8080/dashboard/"
 }
 
 # ============================================================
-#  Option 3 — Setup Backup Monitor Cron
+#  Menu Option 3 — Bootstrap LXC ("Golden Image")
 # ============================================================
-do_backup_monitor() {
-    separator
-    log_info "Backup Monitor — Cron Setup"
-    separator
+do_bootstrap_lxc() {
+    hr
+    log_info "LXC Golden-Image Bootstrapper"
+    hr
     echo ""
 
-    local SCRIPT_PATH="${SCRIPTS_DIR}/pve_backup_check.sh"
-    local LOG_PATH="/var/log/pve_backup_check.log"
-
-    # Show current crontab entries for this script
-    if crontab -l 2>/dev/null | grep -q "pve_backup_check.sh"; then
-        log_warn "An existing cron entry was found:"
-        crontab -l 2>/dev/null | grep "pve_backup_check.sh"
-        echo ""
-        read -rp "$(printf "${YELLOW}Replace the existing entry? [y/N]:${NC} ")" REPLACE
-        if [[ ! "${REPLACE}" =~ ^[yY] ]]; then
-            log_info "Keeping existing cron job. Returning to menu."
-            return
-        fi
-        # Remove old entry
-        crontab -l 2>/dev/null | grep -v "pve_backup_check.sh" | crontab -
-        log_ok "Old cron entry removed."
-    fi
-
-    echo ""
-    echo "  When should the backup check run?"
-    echo ""
-    echo "    1) Daily at 07:00 AM"
-    echo "    2) Daily at 09:00 AM"
-    echo "    3) Every 6 hours"
-    echo "    4) Custom (enter your own cron expression)"
-    echo ""
-    read -rp "  Select [1-4]: " CRON_CHOICE
-
-    case "${CRON_CHOICE}" in
-        1) CRON_EXPR="0 7 * * *"   ;;
-        2) CRON_EXPR="0 9 * * *"   ;;
-        3) CRON_EXPR="0 */6 * * *" ;;
-        4)
-            read -rp "  Enter cron expression (e.g. '30 6 * * 1-5'): " CRON_EXPR
-            ;;
-        *)
-            log_err "Invalid selection."
-            return
-            ;;
-    esac
-
-    # How many days to look back
-    read -rp "  Days to look back [default: 1]: " LOOKBACK
-    LOOKBACK="${LOOKBACK:-1}"
-
-    # Build the cron line
-    CRON_LINE="${CRON_EXPR} ${SCRIPT_PATH} --days ${LOOKBACK} >> ${LOG_PATH} 2>&1"
-
-    # Install
-    (crontab -l 2>/dev/null; echo "${CRON_LINE}") | crontab -
-
-    echo ""
-    log_ok "Cron job installed:"
-    echo "  ${CRON_LINE}"
-    log_info "Logs will be written to ${LOG_PATH}"
-}
-
-# ============================================================
-#  Option 4 — LXC Hardening / Baseline Setup
-# ============================================================
-do_lxc_hardening() {
-    separator
-    log_info "LXC Baseline Hardening"
-    separator
-    echo ""
-
-    # List running containers for reference
-    log_info "Currently running containers:"
+    log_info "Running containers:"
     echo ""
     printf "  ${BOLD}%-8s %-12s %s${NC}\n" "CTID" "STATUS" "HOSTNAME"
-    separator
+    hr
     pct list | awk 'NR>1 {printf "  %-8s %-12s %s\n", $1, $2, $3}'
     echo ""
 
-    read -rp "  Enter the Container ID (CTID) to harden: " TARGET_CTID
-
-    # Validate input
-    if ! [[ "${TARGET_CTID}" =~ ^[0-9]+$ ]]; then
-        log_err "Invalid CTID: '${TARGET_CTID}'. Must be a number."
+    read -rp "  Enter the Container ID (CTID) to bootstrap: " ctid
+    if ! [[ "${ctid}" =~ ^[0-9]+$ ]]; then
+        log_err "Invalid CTID '${ctid}'. Must be numeric."
+        return
+    fi
+    if ! pct status "${ctid}" >/dev/null 2>&1; then
+        log_err "Container ${ctid} does not exist."
         return
     fi
 
-    # Check container exists
-    if ! pct status "${TARGET_CTID}" >/dev/null 2>&1; then
-        log_err "Container ${TARGET_CTID} does not exist."
-        return
-    fi
-
-    # Optional timezone override
-    read -rp "  Timezone [default: Europe/Berlin]: " TZ_INPUT
-    TZ_INPUT="${TZ_INPUT:-Europe/Berlin}"
+    read -rp "  Timezone [Europe/Berlin]: " tz
+    tz="${tz:-Europe/Berlin}"
 
     echo ""
-    log_info "Running baseline setup on CT ${TARGET_CTID}..."
-    echo ""
-    bash "${SCRIPTS_DIR}/lxc_baseline_setup.sh" "${TARGET_CTID}" --timezone "${TZ_INPUT}"
+    bash "${SCRIPTS_DIR}/bootstrap_lxc.sh" "${ctid}" --timezone "${tz}"
 }
 
 # ============================================================
-#  Main Menu
+#  Menu Option 4 — Host Health Check
 # ============================================================
-show_banner() {
-    clear
+do_health_check() {
+    hr
+    log_info "Host Health Check"
+    hr
     echo ""
-    printf "${GREEN}"
-    cat << 'BANNER'
-   ___  _   _____   _    _                 _____          _
-  | _ \| | / / __| | |  (_)_ _ _  ___ __  |_   _|___ ___ | |___
-  |  _/| |/ /| _|  | |__| | ' \ || \ \ /   | | / _ \/ _ \| (_-<
-  |_|   \__/ |___| |____|_|_||_\_,_/_\_\   |_| \___/\___/|_/__/
-
-BANNER
-    printf "${NC}"
-    echo "  Proxmox VE — Automation Toolkit Installer"
-    echo "  $(pveversion 2>/dev/null || echo 'PVE Host')"
-    separator
-    echo ""
+    bash "${SCRIPTS_DIR}/pve_health.sh"
 }
 
-main_menu() {
+# ============================================================
+#  Main Menu (select loop)
+# ============================================================
+main() {
+    preflight
+
     while true; do
         show_banner
 
-        echo "  ${BOLD}What would you like to do?${NC}"
-        echo ""
-        echo "    ${GREEN}1)${NC}  Update All Containers       (snapshot + update)"
-        echo "    ${GREEN}2)${NC}  Install Monitoring Stack    (Traefik + InfluxDB + Grafana)"
-        echo "    ${GREEN}3)${NC}  Setup Backup Monitor        (cron job for vzdump checks)"
-        echo "    ${GREEN}4)${NC}  LXC Hardening               (baseline setup on a container)"
-        echo ""
-        echo "    ${RED}5)${NC}  Exit"
-        echo ""
+        PS3=$'\n  Select an option: '
+        select opt in \
+            "Update All Containers   (snapshot + upgrade)" \
+            "Setup Monitoring Stack  (Traefik / InfluxDB / Grafana)" \
+            "LXC Bootstrapper        (Golden Image setup)" \
+            "Host Health Check       (SMART + backup audit)" \
+            "Exit"; do
 
-        read -rp "  Select an option [1-5]: " CHOICE
-        echo ""
-
-        case "${CHOICE}" in
-            1) do_update_containers   ;;
-            2) do_monitoring_stack    ;;
-            3) do_backup_monitor      ;;
-            4) do_lxc_hardening       ;;
-            5) exit 0                 ;;
-            *)
-                log_err "Invalid option: '${CHOICE}'"
-                ;;
-        esac
+            case "${REPLY}" in
+                1) do_update_containers  ; break ;;
+                2) do_monitoring_stack   ; break ;;
+                3) do_bootstrap_lxc      ; break ;;
+                4) do_health_check       ; break ;;
+                5) echo ""; log_ok "Goodbye."; exit 0 ;;
+                *) log_err "Invalid option '${REPLY}'" ; break ;;
+            esac
+        done
 
         echo ""
-        read -rp "$(printf "${CYAN}Press Enter to return to the main menu...${NC}")"
+        read -rp "$(printf "  ${DIM}Press Enter to return to the menu...${NC}")"
     done
 }
 
-# ============================================================
-#  Entry point
-# ============================================================
-preflight
-main_menu
+main "$@"
