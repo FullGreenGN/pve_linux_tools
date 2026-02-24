@@ -6,64 +6,59 @@ Utility scripts for Proxmox VE host-level automation. All scripts require **root
 
 ## Overview
 
-| Script                   | Purpose                                              |
-| ------------------------ | ---------------------------------------------------- |
-| `update_containers.sh`   | Update all running LXCs with pre-update snapshots    |
-| `pve_backup_check.sh`    | Audit recent vzdump jobs and report failures         |
-| `lxc_baseline_setup.sh`  | Apply a standard baseline config to a new container  |
+| Script                   | Purpose                                                       |
+| ------------------------ | ------------------------------------------------------------- |
+| `update_containers.sh`   | Update all running LXCs with ZFS/LVM pre-update snapshots     |
+| `pve_backup_check.sh`    | Audit recent vzdump jobs — colour-coded pass/fail report      |
+| `lxc_baseline_setup.sh`  | First-run hardening: packages, timezone, SSH, firewall        |
+
+> **Tip:** All three scripts are also accessible via the interactive **`setup.sh`** installer at the repository root.
 
 ---
 
 ## `update_containers.sh`
 
-Automatically updates **all running LXC containers** on a Proxmox VE host. Before touching each container, it creates a **snapshot** (`pre_update_YYYY-MM-DD`) so you can roll back instantly if an update breaks something.
+Automatically updates **all running LXC containers** on a Proxmox VE host. Before touching each container, it creates a snapshot using the best available method for the storage backend.
 
-### Features
+### Snapshot Strategy
 
-- **Root check** — exits immediately if not run as `root`.
-- **Auto-discovery** — uses `pct list` to enumerate all running containers.
-- **Pre-update snapshots** — `pct snapshot <ID> pre_update_$(date +%F)` before every update.
-- **OS detection** — probes release files inside each container to identify the distribution.
-- **Multi-distro support** — handles four major package managers.
-- **Summary report** — prints success/fail/skip counts at the end.
+| Storage Type     | Snapshot Method           | Fallback        |
+| ---------------- | ------------------------- | --------------- |
+| ZFS (`zfspool`)  | `zfs snapshot`            | `pct snapshot`  |
+| LVM / LVM-Thin   | `lvcreate --snapshot`     | `pct snapshot`  |
+| Directory / NFS  | —                         | `pct snapshot`  |
+
+The snapshot is named `pre_update_YYYY-MM-DD` and includes a description for easy identification.
 
 ### Supported Distributions
 
-| Distribution     | Detection File           | Package Manager Command                                                          |
-| ---------------- | ------------------------ | -------------------------------------------------------------------------------- |
-| Debian / Ubuntu  | `/etc/debian_version`    | `apt-get update && apt-get dist-upgrade -y && apt-get autoremove -y`             |
-| Alpine Linux     | `/etc/alpine-release`    | `apk update && apk upgrade`                                                     |
-| Arch Linux       | `/etc/arch-release`      | `pacman -Syu --noconfirm`                                                        |
-| Fedora           | `/etc/fedora-release`    | `dnf upgrade -y`                                                                 |
+| Distribution     | Detection File           | Update Command                                                           |
+| ---------------- | ------------------------ | ------------------------------------------------------------------------ |
+| Debian / Ubuntu  | `/etc/debian_version`    | `apt-get update && apt-get dist-upgrade -y && apt-get autoremove -y`     |
+| Alpine Linux     | `/etc/alpine-release`    | `apk update && apk upgrade`                                             |
+| Arch Linux       | `/etc/arch-release`      | `pacman -Syu --noconfirm`                                               |
+| Fedora           | `/etc/fedora-release`    | `dnf upgrade -y`                                                         |
 
 ### Usage
 
 ```bash
-# Copy to PVE host
-scp scripts/update_containers.sh root@<pve-ip>:/root/
-
-# Run
-chmod +x /root/update_containers.sh
 ./update_containers.sh
 ```
 
 ### Rollback a Failed Update
 
 ```bash
-# List snapshots for a container
+# List snapshots
 pct listsnapshot <CTID>
 
-# Rollback to the pre-update snapshot
+# Roll back
 pct rollback <CTID> pre_update_2026-02-24
+
+# For ZFS snapshots
+zfs rollback <dataset>@pre_update_2026-02-24
 ```
 
 ### Scheduling with Cron
-
-Run every Sunday at 03:00 AM:
-
-```bash
-crontab -e
-```
 
 ```cron
 0 3 * * 0 /root/update_containers.sh >> /var/log/lxc_updates.log 2>&1
@@ -73,12 +68,18 @@ crontab -e
 
 ## `pve_backup_check.sh`
 
-Scans recent Proxmox VE backup tasks (`vzdump`) and reports their status. Ideal for daily health-check cron jobs or integration with notification systems (email, Telegram, etc.).
+Scans recent Proxmox VE backup tasks (`vzdump`) and displays a colour-coded report:
+
+| Colour  | Meaning                |
+| ------- | ---------------------- |
+| 🟢 Green  | Backup completed OK    |
+| 🔴 Red    | Backup failed / error  |
+| 🟡 Yellow | Still running / unknown |
 
 ### How It Works
 
-1. **Primary method** — queries the PVE task log via `pvesh` API (requires `jq`).
-2. **Fallback method** — scans `/var/log/pve/tasks/` on the filesystem if `pvesh` or `jq` is unavailable.
+1. **Primary:** Parses task index files in `/var/log/pve/tasks/` directly.
+2. **Alternative:** Queries the `pvesh` REST API (requires `jq`).
 
 ### Usage
 
@@ -99,14 +100,12 @@ Scans recent Proxmox VE backup tasks (`vzdump`) and reports their status. Ideal 
 
 ### Exit Codes
 
-| Code | Meaning                                |
-| ---- | -------------------------------------- |
+| Code | Meaning                                 |
+| ---- | --------------------------------------- |
 | `0`  | All backup tasks completed successfully |
-| `1`  | One or more backup tasks failed        |
+| `1`  | One or more backup tasks failed         |
 
-### Scheduling with Cron
-
-Run daily at 07:00 AM and email failures:
+### Cron + Email Notification
 
 ```cron
 0 7 * * * /root/pve_backup_check.sh --days 1 || mail -s "PVE Backup FAILURE on $(hostname)" admin@example.com < /dev/null
@@ -114,53 +113,67 @@ Run daily at 07:00 AM and email failures:
 
 ### Prerequisites
 
-- `pvesh` (included with Proxmox VE)
-- `jq` (install with `apt install jq` — optional; filesystem fallback is used without it)
+- `jq` — optional but recommended (`apt install jq`)
 
 ---
 
 ## `lxc_baseline_setup.sh`
 
-Applies a **standardized baseline configuration** to a freshly created LXC container. Gets a new container from "empty" to "production-ready" in seconds.
+Applies a **standardized first-run configuration** to a freshly created LXC container.
 
 ### What It Configures
 
-| Phase       | Action                                                           |
-| ----------- | ---------------------------------------------------------------- |
-| Timezone    | Sets the container timezone (default: `Europe/Berlin`)           |
-| Packages    | Installs `curl`, `wget`, `nano`, `htop`, `git`, `ca-certificates`, SSH |
-| SSH         | Disables password auth, root key-only, max 3 auth tries         |
-| Firewall    | Denies all incoming except SSH, allows all outgoing              |
-| Locale      | Generates `en_US.UTF-8` (Debian/Ubuntu only)                    |
+| Phase       | Action                                                              |
+| ----------- | ------------------------------------------------------------------- |
+| Timezone    | Sets the container timezone (default: `Europe/Berlin`)              |
+| Packages    | Installs `curl`, `vim`, `htop`, `ca-certificates`, SSH              |
+| SSH         | Disables password auth, root key-only, max 3 auth tries            |
+| SSH Key     | Optionally injects a public key into `/root/.ssh/authorized_keys`   |
+| Locale      | Generates `en_US.UTF-8` (Debian/Ubuntu only)                       |
 
 ### Usage
 
 ```bash
-# Basic — apply baseline to container 105
+# Direct invocation with CTID
 ./lxc_baseline_setup.sh 105
 
-# Custom timezone
-./lxc_baseline_setup.sh 105 --timezone America/New_York
+# With all options
+./lxc_baseline_setup.sh 105 --timezone America/New_York --ssh-key ~/.ssh/id_ed25519.pub
+
+# Interactive mode (prompts for CTID and SSH key)
+./lxc_baseline_setup.sh
 ```
 
 ### Options
 
 | Flag                  | Description                                | Default          |
 | --------------------- | ------------------------------------------ | ---------------- |
-| `<CTID>` (required)   | Container ID to configure                  | —                |
+| `<CTID>`              | Container ID (optional — prompts if omitted) | —              |
 | `--timezone TZ`       | IANA timezone string                       | `Europe/Berlin`  |
+| `--ssh-key PATH`      | Path to a public SSH key to inject          | —               |
 | `--help`, `-h`        | Show help message                          | —                |
 
-### Post-Setup — Add Your SSH Key
+---
 
-The script disables password authentication. To access the container afterwards:
+## `setup.sh` (Master Installer)
+
+The root-level `setup.sh` script provides an **interactive menu** that wraps all three scripts above, plus the monitoring stack deployment:
+
+```text
+1)  Update All Containers      → runs update_containers.sh
+2)  Install Monitoring Stack   → checks Docker, deploys docker-compose
+3)  Setup Backup Monitor       → configures cron for pve_backup_check.sh
+4)  LXC Hardening              → runs lxc_baseline_setup.sh interactively
+5)  Exit
+```
+
+Pre-flight checks: root, PVE host verification, Docker dependency check with auto-install offer.
 
 ```bash
-pct exec <CTID> -- mkdir -p /root/.ssh
-pct push <CTID> ~/.ssh/id_rsa.pub /root/.ssh/authorized_keys
+./setup.sh
 ```
 
 ---
 
 > [!WARNING]
-> All scripts must be run **directly on the Proxmox VE host** as `root`. They will not work inside a container or on a remote machine without `pct` / `pvesh` access.
+> All scripts must be run **directly on the Proxmox VE host** as `root`. They will not work inside a container or on a remote machine without `pct` / `pvesh` / `pveversion` access.

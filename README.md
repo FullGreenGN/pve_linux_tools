@@ -10,9 +10,10 @@ A collection of utility scripts and Docker configurations designed to streamline
 .
 ├── LICENSE                                          # MIT License
 ├── README.md                                        # ← You are here
+├── setup.sh                                         # Master interactive installer
 ├── scripts/
 │   ├── README.md                                    # Script-specific documentation
-│   ├── update_containers.sh                         # Multi-OS LXC updater + snapshots
+│   ├── update_containers.sh                         # Multi-OS LXC updater + ZFS/LVM snapshots
 │   ├── pve_backup_check.sh                          # Vzdump backup job auditor
 │   └── lxc_baseline_setup.sh                        # New container standardization
 └── docker_compose/
@@ -30,59 +31,87 @@ A collection of utility scripts and Docker configurations designed to streamline
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Quick Start — Interactive Installer
 
-### 1. Scripts (`scripts/`)
-
-All scripts require **root privileges** and are designed to run **directly on the Proxmox VE host**.
+The fastest way to use this toolkit is through the **master installer**:
 
 ```bash
-# Copy all scripts to your PVE host
-scp scripts/*.sh root@<your-pve-ip>:/root/
+chmod +x setup.sh
+./setup.sh
+```
 
-# Make them executable
+This presents an interactive menu:
+
+```text
+┌──────────────────────────────────────────────┐
+│  1)  Update All Containers                   │
+│  2)  Install Monitoring Stack                │
+│  3)  Setup Backup Monitor                    │
+│  4)  LXC Hardening                           │
+│  5)  Exit                                    │
+└──────────────────────────────────────────────┘
+```
+
+**Built-in safety checks:**
+
+- ✅ Verifies you're running as `root`
+- ✅ Confirms this is a Proxmox VE host (`/usr/bin/pveversion`)
+- ✅ Checks for Docker/Docker Compose before deploying the monitoring stack
+- ✅ Offers to install Docker automatically if missing
+- ✅ Cleans up temporary files on exit (trap handler)
+
+---
+
+## 📦 Individual Scripts (`scripts/`)
+
+All scripts can also be run standalone. They require **root privileges** on the PVE host.
+
+```bash
+scp scripts/*.sh root@<your-pve-ip>:/root/
 chmod +x /root/*.sh
 ```
 
-#### `update_containers.sh` — Smart LXC Updater
+### `update_containers.sh` — Smart LXC Updater
 
-Automatically updates **all running LXC containers**. Creates a **pre-update snapshot** for each container so you can roll back instantly if something breaks.
+Updates **all running LXC containers** with automatic OS detection. Creates a **ZFS or LVM snapshot** before each update for instant rollback.
 
-**Supported OS:** Debian/Ubuntu (`apt`), Alpine (`apk`), Arch (`pacman`), Fedora (`dnf`)
+| OS              | Package Manager | Snapshot Method                  |
+| --------------- | --------------- | -------------------------------- |
+| Debian / Ubuntu | `apt`           | ZFS → LVM → `pct snapshot`      |
+| Alpine          | `apk`           | ZFS → LVM → `pct snapshot`      |
+| Arch            | `pacman`        | ZFS → LVM → `pct snapshot`      |
+| Fedora          | `dnf`           | ZFS → LVM → `pct snapshot`      |
 
 ```bash
 ./update_containers.sh
 ```
 
-#### `pve_backup_check.sh` — Backup Auditor
+### `pve_backup_check.sh` — Backup Auditor
 
-Scans recent `vzdump` backup tasks and reports successes and failures. Uses the `pvesh` API when available, falls back to filesystem logs otherwise.
+Parses `/var/log/pve/tasks` for recent `vzdump` results and displays them in colour (**Green** = OK, **Red** = Error, **Yellow** = Running). Falls back to the `pvesh` API when available.
 
 ```bash
-# Check last 24 hours
-./pve_backup_check.sh
-
-# Check last 7 days
-./pve_backup_check.sh --days 7
+./pve_backup_check.sh              # last 24 hours
+./pve_backup_check.sh --days 7     # last 7 days
 ```
 
-#### `lxc_baseline_setup.sh` — Container Baseline
+### `lxc_baseline_setup.sh` — Container Hardening
 
-Applies a standard configuration to a freshly created container: timezone, common packages, SSH hardening, and firewall rules.
+Applies first-run standardization to a fresh container: installs `curl`, `vim`, `htop`, sets timezone, hardens SSH, and optionally injects an SSH public key.
 
 ```bash
-./lxc_baseline_setup.sh 105 --timezone Europe/Berlin
+./lxc_baseline_setup.sh 105
+./lxc_baseline_setup.sh 105 --timezone America/New_York --ssh-key ~/.ssh/id_ed25519.pub
+./lxc_baseline_setup.sh            # interactive mode
 ```
 
 > 📖 See [`scripts/README.md`](./scripts/README.md) for full documentation, cron scheduling, rollback instructions, and examples.
 
 ---
 
-### 2. Monitoring Stack (`docker_compose/monitoring/`)
+## 📊 Monitoring Stack (`docker_compose/monitoring/`)
 
 A production-ready **Traefik + InfluxDB v2 + Grafana** stack optimized for Proxmox VE monitoring.
-
-**Services:**
 
 | Service         | Role                                              | Port(s)       |
 | --------------- | ------------------------------------------------- | ------------- |
@@ -90,35 +119,15 @@ A production-ready **Traefik + InfluxDB v2 + Grafana** stack optimized for Proxm
 | **InfluxDB v2** | Time-series database (auto-initialized)            | `8086`        |
 | **Grafana**     | Dashboard & visualization (auto-provisioned)       | `3000`        |
 
-**Quick Start:**
-
 ```bash
 cd docker_compose/monitoring
-
-# 1. Configure your environment
-cp .env .env.local
-nano .env.local          # Set DOMAIN, ACME_EMAIL, passwords, tokens
-
-# 2. Deploy
+cp .env .env.local && nano .env.local
 docker compose up -d
-
-# 3. Verify
-docker compose ps
 ```
 
-**Key Features:**
+**Proxmox Integration:** Datacenter → Metric Server → Add → InfluxDB → point to port `8086` with org/bucket/token from `.env`.
 
-- 🔒 **Automatic HTTPS** — Traefik handles TLS certificates via Let's Encrypt (TLS-ALPN-01 challenge).
-- 📊 **Auto-provisioned datasource** — Grafana connects to InfluxDB automatically on first boot.
-- 🔧 **Environment-driven config** — All secrets and settings live in `.env`, never hardcoded.
-
-**Proxmox Integration:**
-
-1. Navigate to **Datacenter → Metric Server → Add → InfluxDB** in the Proxmox GUI.
-2. Point it to your Docker host on port `8086` using the org, bucket, and token from your `.env` file.
-3. Metrics will begin flowing within seconds.
-
-> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for full architecture diagram, all config options, and detailed deployment steps.
+> 📖 See [`docker_compose/monitoring/README.md`](./docker_compose/monitoring/README.md) for full architecture diagram and deployment guide.
 
 ---
 
