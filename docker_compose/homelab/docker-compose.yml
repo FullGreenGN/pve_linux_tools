@@ -1,0 +1,282 @@
+# ============================================================
+#  Homelab Stack — All-in-One Docker Compose
+# ============================================================
+#  Usage:
+#    1. cp .env.example .env && nano .env
+#    2. docker compose up -d
+#
+#  Services: NPM · Postgres · Redis · MariaDB · n8n · Docmost
+#            Affine · Vikunja · Homebox · Mealie · Actual Budget
+#            Glance · Uptime Kuma · MySpeed · Grafana · InfluxDB
+# ============================================================
+
+networks:
+  homelab:
+    name: homelab
+    driver: bridge
+
+services:
+
+  # ==========================================
+  # CORE & NETWORKING
+  # ==========================================
+
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: nginx-proxy-manager
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "81:81"
+      - "443:443"
+    volumes:
+      - ${DOCKER_DATA_DIR}/npm/data:/data
+      - ${DOCKER_DATA_DIR}/npm/letsencrypt:/etc/letsencrypt
+    networks:
+      - homelab
+
+  # ==========================================
+  # SHARED DATABASES
+  # ==========================================
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${DOCKER_DATA_DIR}/postgres:/var/lib/postgresql/data
+    networks:
+      - homelab
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_DATA_DIR}/redis:/data
+    networks:
+      - homelab
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mariadb:
+    image: mariadb:10
+    container_name: mariadb
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ${DOCKER_DATA_DIR}/mariadb:/var/lib/mysql
+    networks:
+      - homelab
+    healthcheck:
+      test: [ "CMD", "healthcheck.sh", "--connect", "--innodb_initialized" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # PRODUCTIVITY APPS
+  # ==========================================
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      NODE_ENV: production
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+    volumes:
+      - ${DOCKER_DATA_DIR}/n8n:/home/node/.n8n
+    networks:
+      - homelab
+
+  docmost:
+    image: docmost/docmost:latest
+    container_name: docmost
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_URL: ${DOCMOST_APP_URL}
+      APP_SECRET: ${DOCMOST_APP_SECRET}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/docmost?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${DOCMOST_PORT}:3000"
+    networks:
+      - homelab
+
+  affine:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${AFFINE_PORT}:3010"
+    environment:
+      AFFINE_ADMIN_PASSWORD: ${AFFINE_ADMIN_PASSWORD}
+      AFFINE_ADMIN_EMAIL: ${AFFINE_ADMIN_EMAIL}
+      DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/affine
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ${DOCKER_DATA_DIR}/affine/config:/root/.affine/config
+      - ${DOCKER_DATA_DIR}/affine/storage:/root/.affine/storage
+    networks:
+      - homelab
+
+  vikunja:
+    image: vikunja/vikunja
+    container_name: vikunja
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    ports:
+      - "${VIKUNJA_PORT}:3456"
+    environment:
+      VIKUNJA_DATABASE_HOST: mariadb
+      VIKUNJA_DATABASE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      VIKUNJA_DATABASE_TYPE: mysql
+      VIKUNJA_DATABASE_USER: root
+      VIKUNJA_DATABASE_DATABASE: vikunja
+      VIKUNJA_SERVICE_PUBLICURL: http://${HOST_IP}:${VIKUNJA_PORT}/
+    volumes:
+      - ${DOCKER_DATA_DIR}/vikunja/files:/app/vikunja/files
+    networks:
+      - homelab
+
+  homebox:
+    image: ghcr.io/sysadminsmedia/homebox:latest
+    container_name: homebox
+    restart: unless-stopped
+    environment:
+      HBOX_LOG_LEVEL: info
+      HBOX_WEB_MAX_UPLOAD_SIZE: "10"
+    volumes:
+      - ${DOCKER_DATA_DIR}/homebox:/data
+    ports:
+      - "7745:7745"
+    networks:
+      - homelab
+
+  mealie:
+    image: hkotel/mealie:latest
+    container_name: mealie
+    restart: unless-stopped
+    ports:
+      - "${MEALIE_PORT}:9000"
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      BASE_URL: ${MEALIE_BASE_URL}
+    volumes:
+      - ${DOCKER_DATA_DIR}/mealie:/app/data
+    networks:
+      - homelab
+
+  actualbudget:
+    image: actualbudget/actual-server:latest
+    container_name: actualbudget
+    restart: unless-stopped
+    ports:
+      - "5006:5006"
+    volumes:
+      - ${DOCKER_DATA_DIR}/actualbudget:/data
+    networks:
+      - homelab
+
+  # ==========================================
+  # MONITORING & DASHBOARDS
+  # ==========================================
+
+  glance:
+    image: glanceapp/glance
+    container_name: glance
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_DATA_DIR}/glance/glance.yml:/app/glance.yml
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - homelab
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_DATA_DIR}/uptime-kuma:/app/data
+    ports:
+      - "3001:3001"
+    networks:
+      - homelab
+
+  myspeed:
+    image: germannewsmaker/myspeed
+    container_name: myspeed
+    restart: unless-stopped
+    ports:
+      - "5216:5216"
+    volumes:
+      - ${DOCKER_DATA_DIR}/myspeed:/myspeed/data
+    networks:
+      - homelab
+
+  grafana:
+    image: grafana/grafana-enterprise
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ${DOCKER_DATA_DIR}/grafana:/var/lib/grafana
+    networks:
+      - homelab
+
+  influxdb:
+    image: influxdb:latest
+    container_name: influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    volumes:
+      - ${DOCKER_DATA_DIR}/influxdb/data:/var/lib/influxdb2
+      - ${DOCKER_DATA_DIR}/influxdb/config:/etc/influxdb2
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_INIT_USERNAME}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_INIT_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_INIT_ORG}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_INIT_BUCKET}
+    networks:
+      - homelab

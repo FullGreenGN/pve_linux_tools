@@ -8,6 +8,7 @@ A modular, professional automation toolkit for **Proxmox VE** environments — c
 
 ```text
 .
+├── .gitignore                                       # Keeps .env + OS files out of Git
 ├── LICENSE                                          # MIT License
 ├── README.md                                        # ← You are here
 ├── setup.sh                                         # Master interactive installer
@@ -17,6 +18,10 @@ A modular, professional automation toolkit for **Proxmox VE** environments — c
 │   ├── bootstrap_lxc.sh                             # Golden Image container setup
 │   └── pve_health.sh                                # SMART disk + backup audit
 └── docker_compose/
+    ├── homelab/                                     # ⬅ NEW — Full homelab stack
+    │   ├── .env.example                             # Environment variable template
+    │   ├── README.md                                # Stack documentation
+    │   └── docker-compose.yml                       # 15-service all-in-one stack
     └── monitoring/
         ├── .env                                     # Environment variable template
         ├── README.md                                # Stack documentation
@@ -109,6 +114,27 @@ Two-part health scan:
 ```
 
 > 📖 See [`scripts/README.md`](./scripts/README.md) for full options, cron scheduling, and examples.
+
+---
+
+## 🏠 Homelab Stack
+
+A **15-service all-in-one** Docker Compose stack covering reverse proxy, databases, productivity apps, and monitoring dashboards — all configurable via a single `.env` file.
+
+| Category | Services |
+|----------|----------|
+| **Core** | Nginx Proxy Manager |
+| **Databases** | PostgreSQL 16 · Redis 7 · MariaDB 10 |
+| **Productivity** | n8n · Docmost · Affine · Vikunja · Homebox · Mealie · Actual Budget |
+| **Monitoring** | Glance · Uptime Kuma · MySpeed · Grafana · InfluxDB |
+
+```bash
+cd docker_compose/homelab
+cp .env.example .env && nano .env
+docker compose up -d
+```
+
+> 📖 See [`docker_compose/homelab/README.md`](./docker_compose/homelab/README.md) for full setup guide, DB init, and security tips.
 
 ---
 
