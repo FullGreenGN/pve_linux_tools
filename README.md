@@ -40,7 +40,7 @@ A modular, professional automation toolkit for **Proxmox VE** environments — c
 
 ```bash
 # Clone and run the interactive installer
-git clone https://github.com/<you>/pve_linux_tools.git
+git clone https://github.com/FullGreenGN/pve_linux_tools.git
 cd pve_linux_tools
 chmod +x setup.sh
 ./setup.sh
